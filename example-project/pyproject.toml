@@ -1,0 +1,56 @@
+[tool.poetry]
+name = "example-project"
+version = "0.1.0"
+description = "Example project using poetry-local-resolver plugin"
+authors = ["Your Name <your.email@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+# These dependencies will be resolved locally if found in workspace
+calltree-common-lib = "^0.1.0"
+calltree-utils = "^0.2.0"
+calltree-auth = "^0.3.0"
+# Standard dependencies will be fetched from remote
+requests = "^2.31.0"
+pydantic = "^2.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.7.0"
+
+# Poetry Local Resolver Configuration
+[tool.poetry-local-resolver]
+# Search for packages in these paths (relative to this project)
+search_paths = [
+    "../",                    # Parent directory (workspace root)
+    "../../shared-libs",      # Shared libraries directory
+    "../calltree-packages"    # Specific packages directory
+]
+
+# Exclude these directories when scanning for packages
+exclude = [
+    "__pycache__",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".tox",
+    "dist",
+    "build",
+    "*.egg-info",
+    ".*cache*",
+    "temp*"
+]
+
+# Never resolve these packages locally (always use remote)
+# Useful for packages you always want from CodeArtifact/PyPI
+disable_for = [
+    "numpy",
+    "pandas",
+    "boto3",
+    "aws-cdk-lib"
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
