@@ -1,123 +1,95 @@
-"""Poetry plugin that automatically resolves workspace packages to local paths."""
+"""Poetry plugin that silently overrides dependencies to use local workspace packages."""
 
 import os
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Dict, Optional
 
 from cleo.io.io import IO
 from poetry.console.application import Application
 from poetry.plugins.application_plugin import ApplicationPlugin
-from poetry.repositories.repository import Repository
-from poetry.core.packages.package import Package
+from poetry.core.packages.directory_dependency import DirectoryDependency
+from poetry.core.packages.dependency import Dependency
 
 logger = logging.getLogger(__name__)
 
 
-class LocalWorkspaceRepository(Repository):
-    """A repository that provides local workspace packages."""
-    
-    def __init__(self, name: str, packages: Dict[str, Path], project_dependencies: Set[str]):
-        super().__init__(name)
-        self._local_packages = packages
-        self._project_dependencies = project_dependencies
-        
-    def find_packages(self, dependency):
-        """Find packages matching the dependency in local workspace."""
-        packages = []
-        
-        # Only resolve if this package is:
-        # 1. In our local workspace
-        # 2. Actually a dependency of the current project
-        if (dependency.name in self._local_packages and 
-            dependency.name in self._project_dependencies):
-            local_path = self._local_packages[dependency.name]
-            logger.info(f"Resolving {dependency.name} to local path: {local_path}")
-            
-            # Create a package that points to the local path
-            # This will make Poetry use the local version instead of remote
-            package = Package(
-                name=dependency.name,
-                version="0.0.0",  # Local packages bypass version checks
-                source_type="directory",
-                source_url=str(local_path),
-                source_reference=str(local_path),
-                source_resolved_reference=str(local_path)
-            )
-            packages.append(package)
-            
-        return packages
-    
-    def has_package(self, package):
-        """Check if we have this package locally and it's a project dependency."""
-        return (package.name in self._local_packages and 
-                package.name in self._project_dependencies)
-
-
 class LocalResolverPlugin(ApplicationPlugin):
-    """A Poetry plugin that resolves packages from the parent workspace directory."""
+    """A Poetry plugin that silently overrides to use local workspace packages."""
     
-    def __init__(self):
-        self._workspace_packages: Dict[str, Path] = {}
-        self._project_dependencies: Set[str] = set()
-        
     def activate(self, application: Application, io: Optional[IO] = None) -> None:
-        """Activate the plugin and hook into Poetry's dependency resolution."""
+        """Activate the plugin and patch Poetry's dependency creation."""
         
-        # Get the current project's directory
         try:
-            if hasattr(application, 'poetry') and application.poetry:
-                # Get the path from the TOMLFile object
-                if hasattr(application.poetry.file, 'path'):
-                    project_dir = Path(application.poetry.file.path).parent
-                else:
-                    # Fallback to current directory
-                    project_dir = Path.cwd()
+            if not hasattr(application, 'poetry') or not application.poetry:
+                return
                 
-                # Get the project's dependencies
-                self._get_project_dependencies(application.poetry)
+            project_dir = Path.cwd()
+            
+            # Scan workspace for local packages
+            workspace_packages = self._scan_workspace(project_dir)
+            
+            if not workspace_packages:
+                return
+            
+            # Monkey-patch the dependency factory to use local paths
+            original_create_dependency = Dependency.create_from_pep_508
+            
+            def create_dependency_with_local_override(name, constraint=None, **kwargs):
+                """Override dependency creation to use local paths when available."""
                 
-                # Scan the parent workspace for packages
-                self._scan_workspace(project_dir)
+                # Parse the dependency name (might have extras like "package[extra]")
+                dep_name = name.split("[")[0] if "[" in name else name
                 
-                # Find which local packages are actually used by this project
-                used_packages = self._workspace_packages.keys() & self._project_dependencies
-                
-                if used_packages:
-                    # Add our local repository to Poetry's repository pool
-                    self._inject_local_repository(application)
+                # Check if we have this package locally
+                if dep_name in workspace_packages:
+                    local_path = workspace_packages[dep_name]
+                    logger.info(f"Silently using local path for {dep_name}: {local_path}")
                     
-                    if io:
-                        io.write_line(
-                            f"<info>Poetry Local Resolver: Will use local versions for: "
-                            f"{', '.join(sorted(used_packages))}</info>"
-                        )
-                elif self._workspace_packages and io:
-                    io.write_line(
-                        f"<info>Poetry Local Resolver: Found {len(self._workspace_packages)} "
-                        f"local packages, but none are dependencies of this project</info>"
+                    # Create a directory dependency instead
+                    return DirectoryDependency(
+                        name=dep_name,
+                        path=local_path,
+                        develop=True  # Use develop mode for live changes
                     )
-        except Exception as e:
-            logger.debug(f"Error activating local resolver plugin: {e}")
-    
-    def _get_project_dependencies(self, poetry) -> None:
-        """Get all dependencies declared in the project's pyproject.toml."""
-        try:
-            # Get dependencies from the poetry package
-            package = poetry.package
+                
+                # Otherwise use the original method
+                return original_create_dependency(name, constraint, **kwargs)
             
-            # Get all dependencies (including dev dependencies)
-            for dep in package.all_requires:
-                self._project_dependencies.add(dep.name)
+            # Apply the monkey patch
+            Dependency.create_from_pep_508 = staticmethod(create_dependency_with_local_override)
             
-            logger.debug(f"Project has {len(self._project_dependencies)} dependencies")
+            # Also patch the Package's add_dependency method
+            if hasattr(application.poetry, 'package'):
+                package = application.poetry.package
+                original_add_dependency = package.add_dependency
+                
+                def add_dependency_with_override(dep):
+                    """Override add_dependency to use local paths."""
+                    if isinstance(dep, Dependency) and not isinstance(dep, DirectoryDependency):
+                        if dep.name in workspace_packages:
+                            local_path = workspace_packages[dep.name]
+                            logger.info(f"Overriding {dep.name} to use local path: {local_path}")
+                            dep = DirectoryDependency(
+                                name=dep.name,
+                                path=local_path,
+                                develop=True
+                            )
+                    return original_add_dependency(dep)
+                
+                package.add_dependency = add_dependency_with_override
+            
+            # Log what we're doing (only if verbose)
+            if workspace_packages and logger.isEnabledFor(logging.INFO):
+                logger.info(f"Local resolver active for: {', '.join(workspace_packages.keys())}")
+                
         except Exception as e:
-            logger.debug(f"Error getting project dependencies: {e}")
+            logger.error(f"Failed to activate local resolver: {e}")
     
-    def _scan_workspace(self, project_dir: Path) -> None:
+    def _scan_workspace(self, project_dir: Path) -> Dict[str, Path]:
         """Scan the parent workspace directory for Python packages."""
         
-        # Get the parent directory (workspace)
+        workspace_packages = {}
         workspace_dir = project_dir.parent
         
         # Patterns to exclude
@@ -127,7 +99,6 @@ class LocalResolverPlugin(ApplicationPlugin):
             ".Trash", ".cache", "Library"
         ]
         
-        # Look for Python packages in the workspace
         try:
             for item in workspace_dir.iterdir():
                 if not item.is_dir():
@@ -146,10 +117,15 @@ class LocalResolverPlugin(ApplicationPlugin):
                 if pyproject.exists() and os.access(pyproject, os.R_OK):
                     package_name = self._get_package_name_from_pyproject(pyproject)
                     if package_name:
-                        self._workspace_packages[package_name] = item
-                        logger.debug(f"Found local package: {package_name} at {item}")
+                        # Get project dependencies to only override what's needed
+                        if self._is_project_dependency(project_dir, package_name):
+                            workspace_packages[package_name] = item
+                            logger.debug(f"Will override {package_name} with local path: {item}")
+                        
         except Exception as e:
             logger.debug(f"Error scanning workspace: {e}")
+            
+        return workspace_packages
     
     def _get_package_name_from_pyproject(self, pyproject_path: Path) -> Optional[str]:
         """Extract package name from pyproject.toml."""
@@ -171,28 +147,33 @@ class LocalResolverPlugin(ApplicationPlugin):
         
         return None
     
-    def _inject_local_repository(self, application: Application) -> None:
-        """Inject our local repository into Poetry's repository pool."""
+    def _is_project_dependency(self, project_dir: Path, package_name: str) -> bool:
+        """Check if a package is a dependency of the current project."""
         try:
-            if hasattr(application, 'poetry') and application.poetry:
-                poetry = application.poetry
+            pyproject_path = project_dir / "pyproject.toml"
+            if not pyproject_path.exists():
+                return False
                 
-                # Create our local repository with project dependencies filter
-                local_repo = LocalWorkspaceRepository(
-                    name="local-workspace",
-                    packages=self._workspace_packages,
-                    project_dependencies=self._project_dependencies
-                )
-                
-                # Add it to the repository pool with highest priority
-                if hasattr(poetry, 'pool'):
-                    pool = poetry.pool
-                    # Add with primary priority (before all others)
-                    # Priority.PRIMARY = "primary" in Poetry 2.x
-                    pool.add_repository(local_repo, priority="primary")
+            import toml
+            data = toml.load(pyproject_path)
+            poetry_section = data.get("tool", {}).get("poetry", {})
+            
+            # Check main dependencies
+            deps = poetry_section.get("dependencies", {})
+            if package_name in deps:
+                return True
+            
+            # Check all dependency groups
+            groups = poetry_section.get("group", {})
+            for group_name, group_data in groups.items():
+                if package_name in group_data.get("dependencies", {}):
+                    return True
                     
-                    # Log which packages will be resolved locally
-                    used_packages = self._workspace_packages.keys() & self._project_dependencies
-                    logger.info(f"Added local workspace repository for: {', '.join(sorted(used_packages))}")
+            # Check legacy dev-dependencies
+            if package_name in poetry_section.get("dev-dependencies", {}):
+                return True
+                
         except Exception as e:
-            logger.error(f"Failed to inject local repository: {e}")
+            logger.debug(f"Error checking dependencies: {e}")
+            
+        return False

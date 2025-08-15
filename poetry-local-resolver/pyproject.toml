@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "poetry-local-resolver"
-version = "0.3.1"
+version = "0.5.0"
 description = "A Poetry plugin that resolves packages locally first, then falls back to remote repositories"
 authors = ["Your Name <your.email@example.com>"]
 license = "MIT"
