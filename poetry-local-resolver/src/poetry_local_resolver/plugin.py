@@ -1,6 +1,8 @@
 """Poetry plugin that adds --local flag to use workspace packages."""
 
 import os
+import sys
+import shutil
 import logging
 from pathlib import Path
 from typing import Dict, Optional
@@ -9,8 +11,6 @@ from cleo.io.io import IO
 from poetry.console.application import Application
 from poetry.console.commands.install import InstallCommand
 from poetry.plugins.application_plugin import ApplicationPlugin
-from poetry.core.packages.directory_dependency import DirectoryDependency
-from poetry.factory import Factory
 from cleo.helpers import option
 
 logger = logging.getLogger(__name__)
@@ -28,22 +28,27 @@ class LocalInstallCommand(InstallCommand):
         """Handle the install command with local workspace discovery."""
         use_local = self.option("local")
         
-        if use_local:
-            # Discover and apply local packages WITHOUT modifying pyproject.toml
+        # First run the normal install
+        result = super().handle()
+        
+        if use_local and result == 0:
+            # After successful install, replace with local packages
             workspace_packages = self._discover_workspace_packages()
             if workspace_packages:
                 self.line("")
-                self.line("<comment>Using local workspace packages:</comment>")
+                self.line("<comment>Linking local workspace packages:</comment>")
+                
                 for name, path in workspace_packages.items():
                     rel_path = os.path.relpath(path, Path.cwd())
-                    self.line(f"  • {name} → {rel_path}")
-                self.line("")
+                    if self._link_local_package(name, path):
+                        self.line(f"  <info>✓ {name} → {rel_path}</info>")
+                    else:
+                        self.line(f"  <error>✗ {name} (failed to link)</error>")
                 
-                # Override the installer to use local packages
-                self._configure_local_packages(workspace_packages)
+                self.line("")
+                self.line("<comment>Local packages are now active. Changes will be reflected immediately.</comment>")
         
-        # Run the normal install
-        return super().handle()
+        return result
     
     def _discover_workspace_packages(self) -> Dict[str, Path]:
         """Discover packages in the workspace that match project dependencies."""
@@ -109,40 +114,72 @@ class LocalInstallCommand(InstallCommand):
             pass
         return None
     
-    def _configure_local_packages(self, workspace_packages: Dict[str, Path]):
-        """Configure the installer to use local packages."""
+    def _link_local_package(self, package_name: str, local_path: Path) -> bool:
+        """Replace installed package with symlink to local version."""
         try:
-            if not self.poetry:
-                return
+            # Get the virtualenv path
+            venv_path = self.env.path if self.env else None
+            if not venv_path:
+                return False
             
-            # Get the locker and modify it to use local paths
-            locker = self.poetry.locker
-            if locker and hasattr(locker, "_lock_data") and locker._lock_data:
-                # Modify lock data to point to local paths
-                packages = locker._lock_data.get("package", [])
-                for pkg in packages:
-                    if pkg.get("name") in workspace_packages:
-                        # Convert to directory source
-                        local_path = workspace_packages[pkg["name"]]
-                        pkg["source"] = {
-                            "type": "directory",
-                            "url": str(local_path)
-                        }
-                        pkg["develop"] = True
-                        logger.info(f"Configured {pkg['name']} to use local path")
+            # Find the installed package location
+            # Use the environment's Python version, not the current interpreter's
+            python_version = f"python{self.env.version_info[0]}.{self.env.version_info[1]}" if hasattr(self.env, 'version_info') else f"python{sys.version_info.major}.{sys.version_info.minor}"
+            site_packages = venv_path / "lib" / python_version / "site-packages"
+            if not site_packages.exists():
+                # Try alternative path for Windows or non-standard layouts
+                site_packages = venv_path / "site-packages"
+                if not site_packages.exists():
+                    logger.error(f"Could not find site-packages in {venv_path}")
+                    return False
             
-            # Also modify the pool to prioritize local packages
-            pool = self.poetry.pool
-            if pool and workspace_packages:
-                # Create a mock repository for local packages
-                from poetry.repositories.repository import Repository
-                local_repo = Repository("local-workspace")
-                
-                # Add it with high priority
-                pool.add_repository(local_repo, priority="primary")
-                
+            # Convert package name to module name (e.g., calltree-common-lib -> calltree_common_lib)
+            module_name = package_name.replace("-", "_")
+            installed_path = site_packages / module_name
+            
+            # Find the source directory in the local package
+            # Try common source locations
+            source_candidates = [
+                local_path / "src" / module_name,
+                local_path / module_name,
+                local_path / "lib" / module_name,
+            ]
+            
+            source_path = None
+            for candidate in source_candidates:
+                if candidate.exists() and candidate.is_dir():
+                    source_path = candidate
+                    break
+            
+            if not source_path:
+                logger.warning(f"Could not find source directory for {package_name} in {local_path}")
+                logger.warning(f"Tried: {[str(c) for c in source_candidates]}")
+                return False
+            
+            # Remove existing installation
+            if installed_path.exists():
+                if installed_path.is_symlink():
+                    installed_path.unlink()
+                elif installed_path.is_dir():
+                    shutil.rmtree(installed_path)
+                else:
+                    installed_path.unlink()
+            
+            # Create symlink to local version
+            installed_path.symlink_to(source_path)
+            logger.info(f"Linked {package_name}: {installed_path} -> {source_path}")
+            
+            # Also handle .dist-info or .egg-info directories
+            for info_dir in site_packages.glob(f"{module_name}-*.dist-info"):
+                # Keep the dist-info but add a marker file
+                marker_file = info_dir / "LOCAL_DEVELOPMENT"
+                marker_file.write_text(f"Linked to: {source_path}\n")
+            
+            return True
+            
         except Exception as e:
-            logger.error(f"Failed to configure local packages: {e}")
+            logger.error(f"Failed to link {package_name}: {e}")
+            return False
 
 
 class LocalResolverPlugin(ApplicationPlugin):
