@@ -16,23 +16,20 @@ poetry self add poetry-codeartifact-resolver
 
 ## Authentication
 
-The plugin supports two authentication methods:
+The plugin supports different authentication methods:
 
-### Option 1: Using `calltree auth` (Local Development)
+### Local Development
 ```bash
 calltree auth
 ```
 This configures Poetry directly and is recommended for local development.
 
-### Option 2: Using `configure-codeartifact.sh` (CI/Docker)
-```bash
-./configure-codeartifact.sh
-```
-This sets up environment variables and Poetry config:
+### CI/Docker
+Set environment variables:
 - `CODEARTIFACT_AUTH_TOKEN` - Authentication token for CodeArtifact
-- `AWS_REGION` - AWS region for CodeArtifact URLs
+- `AWS_REGION` - AWS region (defaults to us-east-1)
 
-**Note**: You only need to use ONE of these methods. The plugin works with either approach.
+The plugin focuses solely on URL resolution. Authentication is handled by Poetry's built-in system.
 
 ## Usage
 
@@ -81,7 +78,8 @@ poetry install  # Uses us-east-1 CodeArtifact
 
 The plugin will fail with a clear error message if:
 - The URL format is invalid
-- Neither environment variables nor Poetry config is properly set up
+
+Authentication errors are handled by Poetry's built-in authentication system.
 
 ## Verbose Output
 

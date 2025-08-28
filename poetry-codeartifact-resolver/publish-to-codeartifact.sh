@@ -46,7 +46,7 @@ if [ -z "$CODEARTIFACT_AUTH_TOKEN" ]; then
     echo "No CODEARTIFACT_AUTH_TOKEN found. Checking Poetry configuration..."
     if ! poetry config repositories.codeartifact > /dev/null 2>&1; then
         echo "Error: No CodeArtifact authentication found."
-        echo "Please run 'calltree auth' or './configure-codeartifact.sh' first."
+        echo "Please run 'calltree auth' first."
         exit 1
     fi
     echo "Using existing Poetry configuration from 'calltree auth'."
