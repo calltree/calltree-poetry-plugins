@@ -1,0 +1,54 @@
+[tool.poetry]
+name = "poetry-codeartifact-resolver"
+version = "1.0.0"
+description = "Poetry plugin for dynamic AWS CodeArtifact URL resolution"
+authors = ["Calltree Team <engineering@calltree.ai>"]
+license = "MIT"
+readme = "README.md"
+keywords = ["poetry", "plugin", "aws", "codeartifact", "resolver"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Software Distribution",
+]
+packages = [
+    { include = "poetry_codeartifact_resolver", from = "src" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+poetry = ">=1.2.0,<3.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.7.0"
+ruff = "^0.0.280"
+
+[tool.poetry.plugins."poetry.plugin"]
+poetry-codeartifact-resolver = "poetry_codeartifact_resolver.plugin:CodeArtifactResolverPlugin"
+
+[[tool.poetry.source]]
+name = "codeartifact"
+url = "codeartifact://calltree/python-packages/simple"
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
