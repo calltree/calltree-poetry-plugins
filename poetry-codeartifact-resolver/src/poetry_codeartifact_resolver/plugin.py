@@ -1,8 +1,10 @@
 """Poetry plugin that dynamically resolves CodeArtifact URLs based on AWS_REGION."""
 
 import os
+import json
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 from poetry.plugins.plugin import Plugin
 from poetry.repositories.legacy_repository import LegacyRepository
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
     from poetry.poetry import Poetry
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 
 class CodeArtifactResolverPlugin(Plugin):
@@ -21,11 +24,64 @@ class CodeArtifactResolverPlugin(Plugin):
     Works with either CODEARTIFACT_AUTH_TOKEN (CI/Docker) or Poetry's stored credentials (local).
     """
     
+    def _detect_region(self) -> str:
+        """Determine AWS region with robust precedence.
+
+        Precedence:
+          1) CALLTREE_REGION
+          2) AWS_REGION
+          3) AWS_DEFAULT_REGION
+          4) Calltree CLI config current customer region (~/.config/calltree/config.json)
+          5) us-west-2 (safer default for Calltree)
+        """
+        # Direct overrides first
+        for key in ("CALLTREE_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"):
+            v = os.environ.get(key)
+            if v:
+                return v
+
+        # Fall back to Calltree CLI config if available
+        try:
+            config_path_env = os.environ.get("CALLTREE_CONFIG_PATH", "")
+            if config_path_env:
+                cfg_path = Path(config_path_env).expanduser()
+            else:
+                cfg_path = Path.home() / ".config" / "calltree" / "config.json"
+            
+            logger.debug(f"Checking config path: {cfg_path}")
+            logger.debug(f"Config exists: {cfg_path.exists()}")
+            
+            if cfg_path.exists():
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                logger.debug(f"Config data: {data}")
+                cur = data.get("current_customer")
+                customers = data.get("customers") or {}
+                logger.debug(f"Current customer: {cur}")
+                logger.debug(f"Customers: {customers}")
+                
+                if cur and isinstance(customers, dict):
+                    cc = customers.get(cur) or {}
+                    region = cc.get("region")
+                    logger.debug(f"Customer config: {cc}")
+                    logger.debug(f"Region found: {region}")
+                    
+                    if isinstance(region, str) and region:
+                        return region
+        except Exception as e:
+            logger.debug(f"Config reading failed: {e}")
+            pass
+
+        raise RuntimeError(
+            "CodeArtifact region could not be determined. Set CALLTREE_REGION or AWS_REGION or ensure ~/.config/calltree/config.json contains a current customer with a region."
+        )
+
     def activate(self, poetry: "Poetry", io: "IO") -> None:
         """Transform codeartifact:// URLs in repository sources."""
-        
-        # Get configuration from environment
-        aws_region = os.environ.get("AWS_REGION", "us-east-1")
+
+        # Get configuration from environment / config
+        aws_region = self._detect_region()
         account_id = "831926607337"  # Fixed for Calltree
         auth_token = os.environ.get("CODEARTIFACT_AUTH_TOKEN")
         

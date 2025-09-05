@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "poetry-codeartifact-resolver"
-version = "1.0.0"
+version = "1.0.1"
 description = "Poetry plugin for dynamic AWS CodeArtifact URL resolution"
 authors = ["Calltree Team <engineering@calltree.ai>"]
 license = "MIT"
