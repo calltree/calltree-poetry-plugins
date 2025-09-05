@@ -156,7 +156,29 @@ class LocalInstallCommand(InstallCommand):
                 logger.warning(f"Tried: {[str(c) for c in source_candidates]}")
                 return False
             
-            # Remove existing installation
+            # First, use pip to install in editable mode instead of symlinking
+            # This creates proper metadata that Poetry can work with
+            try:
+                pip_cmd = [sys.executable, "-m", "pip", "install", "-e", str(local_path), "--no-deps"]
+                import subprocess
+                result = subprocess.run(pip_cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info(f"Installed {package_name} in editable mode from {local_path}")
+                    
+                    # Mark as locally developed
+                    for info_dir in site_packages.glob(f"{module_name}*.dist-info"):
+                        marker_file = info_dir / "LOCAL_DEVELOPMENT"
+                        marker_file.write_text(f"Editable install from: {local_path}\n")
+                    
+                    return True
+                else:
+                    logger.warning(f"Failed to install {package_name} in editable mode: {result.stderr}")
+                    # Fall back to symlink method
+                    
+            except Exception as e:
+                logger.debug(f"Could not use pip for editable install: {e}")
+            
+            # Fallback: Remove existing installation and create symlink
             if installed_path.exists():
                 if installed_path.is_symlink():
                     installed_path.unlink()
@@ -169,11 +191,27 @@ class LocalInstallCommand(InstallCommand):
             installed_path.symlink_to(source_path)
             logger.info(f"Linked {package_name}: {installed_path} -> {source_path}")
             
-            # Also handle .dist-info or .egg-info directories
-            for info_dir in site_packages.glob(f"{module_name}-*.dist-info"):
-                # Keep the dist-info but add a marker file
-                marker_file = info_dir / "LOCAL_DEVELOPMENT"
-                marker_file.write_text(f"Linked to: {source_path}\n")
+            # Create a minimal dist-info directory with RECORD file
+            # to prevent Poetry/pip uninstall errors
+            dist_info_name = f"{module_name}-0.0.0.dist-info"
+            dist_info_path = site_packages / dist_info_name
+            dist_info_path.mkdir(exist_ok=True)
+            
+            # Create METADATA file
+            metadata_content = f"""Metadata-Version: 2.1
+Name: {package_name}
+Version: 0.0.0
+Summary: Local development version
+Home-page: {local_path}
+"""
+            (dist_info_path / "METADATA").write_text(metadata_content)
+            
+            # Create RECORD file listing the symlink
+            record_content = f"{module_name},,\n{dist_info_name}/METADATA,,\n{dist_info_name}/RECORD,,\n{dist_info_name}/LOCAL_DEVELOPMENT,,\n"
+            (dist_info_path / "RECORD").write_text(record_content)
+            
+            # Mark as local development
+            (dist_info_path / "LOCAL_DEVELOPMENT").write_text(f"Symlinked to: {source_path}\n")
             
             return True
             
@@ -189,6 +227,12 @@ class LocalResolverPlugin(ApplicationPlugin):
         """Activate the plugin and replace the install command."""
         
         try:
+            # Configure logging
+            logging.basicConfig(
+                level=logging.INFO,
+                format='[%(name)s] %(message)s'
+            )
+            
             # Replace the install command with our extended version
             factory = application.command_loader
             if factory and hasattr(factory, "_factories"):
